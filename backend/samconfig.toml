@@ -1,0 +1,20 @@
+version = 0.1
+
+[default.global.parameters]
+region = "eu-west-1"
+
+[default.validate.parameters]
+lint = true
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[dev.deploy.parameters]
+stack_name = "serverless-todo-dev"
+region = "eu-west-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+fail_on_empty_changeset = false
+parameter_overrides = "Stage=dev GitHubTokenSecretName=\"\""
+tags = "Project=serverless-todo Stage=dev"

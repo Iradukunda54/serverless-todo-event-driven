@@ -1,0 +1,849 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Serverless To-Do app with event-driven expiry processing: Cognito auth,
+  API Gateway REST + Lambda CRUD, DynamoDB single table, EventBridge Scheduler
+  expiry events delivered through SQS FIFO, DynamoDB Streams + SQS FIFO
+  cancellation, SNS email notifications, and an Amplify-hosted frontend.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedPattern: "^[a-z0-9-]+$"
+    Description: Deployment stage name (used in resource names and the API stage).
+  DefaultDeadlineMinutes:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    Description: Minutes after creation when a task expires if no Deadline is given.
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90]
+  FrontendRepositoryUrl:
+    Type: String
+    Default: https://github.com/Iradukunda54/serverless-todo-event-driven
+    Description: GitHub repository that contains the frontend/ folder.
+  FrontendBranch:
+    Type: String
+    Default: main
+  GitHubTokenSecretName:
+    Type: String
+    Default: ""
+    Description: >
+      Name of a Secrets Manager secret (plain-text value) holding a GitHub token
+      for Amplify. Leave empty to deploy the backend without the Amplify app.
+
+Conditions:
+  CreateFrontend: !Not [!Equals [!Ref GitHubTokenSecretName, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.14
+    Architectures: [arm64]
+    CodeUri: src/
+    MemorySize: 256
+    Timeout: 10
+    LoggingConfig:
+      LogFormat: JSON
+      ApplicationLogLevel: INFO
+      SystemLogLevel: WARN
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref TasksTable
+    Tags:
+      Project: serverless-todo
+      Stage: !Ref Stage
+
+Resources:
+  # ------------------------------------------------------------------ Data
+  TasksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-tasks"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: UserId
+          AttributeType: S
+        - AttributeName: TaskId
+          AttributeType: S
+        - AttributeName: Status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: UserId
+          KeyType: HASH
+        - AttributeName: TaskId
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: UserStatusIndex
+          KeySchema:
+            - AttributeName: UserId
+              KeyType: HASH
+            - AttributeName: Status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Project
+          Value: serverless-todo
+        - Key: Stage
+          Value: !Ref Stage
+
+  # ------------------------------------------------------------------ Notifications
+  TaskNotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-task-notifications"
+      DisplayName: To-Do Tasks
+      Tags:
+        - Key: Project
+          Value: serverless-todo
+
+  # ------------------------------------------------------------------ Authentication
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-users"
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      UserPoolTags:
+        Project: serverless-todo
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "${AWS::StackName}-web"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+  # Cognito triggers must not reference UserPool (SAM's Cognito event already
+  # makes the pool depend on these functions).
+  PreSignUpFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Auto-confirms new users and verifies their email
+      Handler: auth_triggers.pre_signup_handler
+      Timeout: 5
+      LoggingConfig:
+        LogGroup: !Ref PreSignUpLogGroup
+      Events:
+        PreSignUp:
+          Type: Cognito
+          Properties:
+            UserPool: !Ref UserPool
+            Trigger: PreSignUp
+
+  PostAuthenticationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Subscribes the signed-in user's email to the SNS notifications topic
+      Handler: auth_triggers.post_authentication_handler
+      Timeout: 5
+      LoggingConfig:
+        LogGroup: !Ref PostAuthenticationLogGroup
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref TaskNotificationsTopic
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sns:Subscribe
+                - sns:ListSubscriptionsByTopic
+              Resource: !Ref TaskNotificationsTopic
+      Events:
+        PostAuthentication:
+          Type: Cognito
+          Properties:
+            UserPool: !Ref UserPool
+            Trigger: PostAuthentication
+
+  # ------------------------------------------------------------------ API
+  TodoApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-api"
+      StageName: !Ref Stage
+      EndpointConfiguration:
+        Type: REGIONAL
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          MetricsEnabled: true
+          ThrottlingBurstLimit: 50
+          ThrottlingRateLimit: 25
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+      GatewayResponses:
+        DEFAULT_4XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+        DEFAULT_5XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+      Tags:
+        Project: serverless-todo
+
+  CreateTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: POST /tasks - creates a task and its one-time expiry schedule
+      Handler: tasks_api.create_handler
+      LoggingConfig:
+        LogGroup: !Ref CreateTaskLogGroup
+      Environment:
+        Variables:
+          SCHEDULE_GROUP: !Ref ExpiryScheduleGroup
+          SCHEDULER_ROLE_ARN: !GetAtt SchedulerRole.Arn
+          EXPIRY_QUEUE_ARN: !GetAtt ExpiryQueue.Arn
+          SCHEDULE_DLQ_ARN: !GetAtt ExpiryScheduleDLQ.Arn
+          DEFAULT_DEADLINE_MINUTES: !Ref DefaultDeadlineMinutes
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:DeleteItem
+              Resource: !GetAtt TasksTable.Arn
+            - Effect: Allow
+              Action: scheduler:CreateSchedule
+              Resource: !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/${ExpiryScheduleGroup}/*"
+            - Effect: Allow
+              Action: iam:PassRole
+              Resource: !GetAtt SchedulerRole.Arn
+              Condition:
+                StringEquals:
+                  iam:PassedToService: scheduler.amazonaws.com
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TodoApi
+            Path: /tasks
+            Method: POST
+
+  ListTasksFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: GET /tasks[?status=] - lists the caller's tasks
+      Handler: tasks_api.list_handler
+      LoggingConfig:
+        LogGroup: !Ref ListTasksLogGroup
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource:
+                - !GetAtt TasksTable.Arn
+                - !Sub "${TasksTable.Arn}/index/UserStatusIndex"
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TodoApi
+            Path: /tasks
+            Method: GET
+
+  GetTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: GET /tasks/{taskId}
+      Handler: tasks_api.get_handler
+      LoggingConfig:
+        LogGroup: !Ref GetTaskLogGroup
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt TasksTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TodoApi
+            Path: /tasks/{taskId}
+            Method: GET
+
+  UpdateTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: PUT /tasks/{taskId} - edits a task or marks it Completed
+      Handler: tasks_api.update_handler
+      LoggingConfig:
+        LogGroup: !Ref UpdateTaskLogGroup
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+                - dynamodb:GetItem
+              Resource: !GetAtt TasksTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TodoApi
+            Path: /tasks/{taskId}
+            Method: PUT
+
+  DeleteTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: DELETE /tasks/{taskId}
+      Handler: tasks_api.delete_handler
+      LoggingConfig:
+        LogGroup: !Ref DeleteTaskLogGroup
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:DeleteItem
+              Resource: !GetAtt TasksTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TodoApi
+            Path: /tasks/{taskId}
+            Method: DELETE
+
+  # ------------------------------------------------------------------ Expiry workflow
+  # EventBridge Scheduler (one-time schedule per task) -> SQS FIFO -> ExpiryFunction
+  ExpiryScheduleGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-task-expiry"
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Assumed by EventBridge Scheduler to deliver task expiry events
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: send-expiry-events
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource:
+                  - !GetAtt ExpiryQueue.Arn
+                  - !GetAtt ExpiryScheduleDLQ.Arn
+
+  ExpiryQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-task-expiry.fifo"
+      FifoQueue: true
+      # Scheduler does not set a deduplication id, so dedupe on message content.
+      ContentBasedDeduplication: true
+      VisibilityTimeout: 180
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ExpiryQueueDLQ.Arn
+        maxReceiveCount: 5
+
+  ExpiryQueueDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-task-expiry-dlq.fifo"
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  # Scheduler dead-letter queues must be standard queues.
+  ExpiryScheduleDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-schedule-delivery-dlq"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  ExpiryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Marks Pending tasks as Expired at their deadline and emails the owner via SNS
+      Handler: expiry.handler
+      Timeout: 30
+      LoggingConfig:
+        LogGroup: !Ref ExpiryLogGroup
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref TaskNotificationsTopic
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+                - dynamodb:GetItem
+              Resource: !GetAtt TasksTable.Arn
+            - Effect: Allow
+              Action: sns:Publish
+              Resource: !Ref TaskNotificationsTopic
+      Events:
+        ExpiryQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ExpiryQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  # ------------------------------------------------------------------ Cancellation workflow
+  # DynamoDB Stream -> StreamProcessorFunction -> SQS FIFO -> CancellationFunction
+  StreamProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Queues expiry cancellations for tasks completed or deleted before their deadline
+      Handler: stream_processor.handler
+      Timeout: 30
+      LoggingConfig:
+        LogGroup: !Ref StreamProcessorLogGroup
+      Environment:
+        Variables:
+          CANCELLATION_QUEUE_URL: !Ref CancellationQueue
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: sqs:SendMessage
+              Resource:
+                - !GetAtt CancellationQueue.Arn
+                - !GetAtt StreamFailureDLQ.Arn
+      Events:
+        TaskStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt TasksTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 25
+            MaximumRetryAttempts: 5
+            BisectBatchOnFunctionError: true
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            DestinationConfig:
+              OnFailure:
+                Type: SQS
+                Destination: !GetAtt StreamFailureDLQ.Arn
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["MODIFY"], "dynamodb": {"OldImage": {"Status": {"S": ["Pending"]}}, "NewImage": {"Status": {"S": ["Completed"]}}}}'
+                - Pattern: '{"eventName": ["REMOVE"], "dynamodb": {"OldImage": {"Status": {"S": ["Pending"]}}}}'
+
+  CancellationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-task-cancellation.fifo"
+      FifoQueue: true
+      VisibilityTimeout: 180
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CancellationQueueDLQ.Arn
+        maxReceiveCount: 5
+
+  CancellationQueueDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-task-cancellation-dlq.fifo"
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  StreamFailureDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-stream-failure-dlq"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  CancellationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Deletes the expiry schedule of a completed or deleted task (idempotent)
+      Handler: cancellation.handler
+      Timeout: 30
+      LoggingConfig:
+        LogGroup: !Ref CancellationLogGroup
+      Environment:
+        Variables:
+          SCHEDULE_GROUP: !Ref ExpiryScheduleGroup
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: scheduler:DeleteSchedule
+              Resource: !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/${ExpiryScheduleGroup}/*"
+      Events:
+        CancellationQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt CancellationQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  # ------------------------------------------------------------------ CloudWatch Logs
+  PreSignUpLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-pre-signup"
+      RetentionInDays: !Ref LogRetentionDays
+  PostAuthenticationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-post-authentication"
+      RetentionInDays: !Ref LogRetentionDays
+  CreateTaskLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-create-task"
+      RetentionInDays: !Ref LogRetentionDays
+  ListTasksLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-list-tasks"
+      RetentionInDays: !Ref LogRetentionDays
+  GetTaskLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-get-task"
+      RetentionInDays: !Ref LogRetentionDays
+  UpdateTaskLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-update-task"
+      RetentionInDays: !Ref LogRetentionDays
+  DeleteTaskLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-delete-task"
+      RetentionInDays: !Ref LogRetentionDays
+  ExpiryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-expiry"
+      RetentionInDays: !Ref LogRetentionDays
+  StreamProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-stream-processor"
+      RetentionInDays: !Ref LogRetentionDays
+  CancellationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-cancellation"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ------------------------------------------------------------------ CloudWatch alarms
+  ExpiryErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-expiry-errors"
+      AlarmDescription: Expiry handler is failing
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ExpiryFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  CancellationErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-cancellation-errors"
+      AlarmDescription: Cancellation pipeline (stream processor or cancellation handler) is failing
+      Metrics:
+        - Id: total
+          Expression: streamErrors + cancelErrors
+          ReturnData: true
+        - Id: streamErrors
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref StreamProcessorFunction
+            Period: 300
+            Stat: Sum
+        - Id: cancelErrors
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref CancellationFunction
+            Period: 300
+            Stat: Sum
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ApiServerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-api-5xx"
+      AlarmDescription: API Gateway is returning 5XX errors
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub "${AWS::StackName}-api"
+        - Name: Stage
+          Value: !Ref Stage
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  DeadLetterQueuesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-dead-letters"
+      AlarmDescription: Messages landed in a dead-letter queue (expiry or cancellation not processed)
+      Metrics:
+        - Id: total
+          Expression: expiryDlq + cancelDlq + scheduleDlq + streamDlq
+          ReturnData: true
+        - Id: expiryDlq
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/SQS
+              MetricName: ApproximateNumberOfMessagesVisible
+              Dimensions:
+                - Name: QueueName
+                  Value: !GetAtt ExpiryQueueDLQ.QueueName
+            Period: 300
+            Stat: Maximum
+        - Id: cancelDlq
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/SQS
+              MetricName: ApproximateNumberOfMessagesVisible
+              Dimensions:
+                - Name: QueueName
+                  Value: !GetAtt CancellationQueueDLQ.QueueName
+            Period: 300
+            Stat: Maximum
+        - Id: scheduleDlq
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/SQS
+              MetricName: ApproximateNumberOfMessagesVisible
+              Dimensions:
+                - Name: QueueName
+                  Value: !GetAtt ExpiryScheduleDLQ.QueueName
+            Period: 300
+            Stat: Maximum
+        - Id: streamDlq
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/SQS
+              MetricName: ApproximateNumberOfMessagesVisible
+              Dimensions:
+                - Name: QueueName
+                  Value: !GetAtt StreamFailureDLQ.QueueName
+            Period: 300
+            Stat: Maximum
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  OperationsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-operations"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {"type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+             "properties": {"title": "API requests and errors", "region": "${AWS::Region}", "stat": "Sum", "period": 300,
+               "metrics": [
+                 ["AWS/ApiGateway", "Count", "ApiName", "${AWS::StackName}-api", "Stage", "${Stage}"],
+                 [".", "4XXError", ".", ".", ".", "."],
+                 [".", "5XXError", ".", ".", ".", "."]]}},
+            {"type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
+             "properties": {"title": "Lambda errors", "region": "${AWS::Region}", "stat": "Sum", "period": 300,
+               "metrics": [
+                 ["AWS/Lambda", "Errors", "FunctionName", "${CreateTaskFunction}"],
+                 ["...", "${UpdateTaskFunction}"],
+                 ["...", "${DeleteTaskFunction}"],
+                 ["...", "${ExpiryFunction}"],
+                 ["...", "${StreamProcessorFunction}"],
+                 ["...", "${CancellationFunction}"],
+                 ["...", "${PostAuthenticationFunction}"]]}},
+            {"type": "metric", "x": 0, "y": 6, "width": 12, "height": 6,
+             "properties": {"title": "Expiry and cancellation invocations", "region": "${AWS::Region}", "stat": "Sum", "period": 300,
+               "metrics": [
+                 ["AWS/Lambda", "Invocations", "FunctionName", "${ExpiryFunction}"],
+                 ["...", "${StreamProcessorFunction}"],
+                 ["...", "${CancellationFunction}"]]}},
+            {"type": "metric", "x": 12, "y": 6, "width": 12, "height": 6,
+             "properties": {"title": "Queues (visible messages)", "region": "${AWS::Region}", "stat": "Maximum", "period": 300,
+               "metrics": [
+                 ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${ExpiryQueue.QueueName}"],
+                 ["...", "${CancellationQueue.QueueName}"],
+                 ["...", "${ExpiryQueueDLQ.QueueName}"],
+                 ["...", "${CancellationQueueDLQ.QueueName}"],
+                 ["...", "${ExpiryScheduleDLQ.QueueName}"],
+                 ["...", "${StreamFailureDLQ.QueueName}"]]}},
+            {"type": "metric", "x": 0, "y": 12, "width": 12, "height": 6,
+             "properties": {"title": "SNS notifications", "region": "${AWS::Region}", "stat": "Sum", "period": 300,
+               "metrics": [
+                 ["AWS/SNS", "NumberOfMessagesPublished", "TopicName", "${TaskNotificationsTopic.TopicName}"],
+                 [".", "NumberOfNotificationsDelivered", ".", "."],
+                 [".", "NumberOfNotificationsFilteredOut", ".", "."],
+                 [".", "NumberOfNotificationsFailed", ".", "."]]}},
+            {"type": "log", "x": 12, "y": 12, "width": 12, "height": 6,
+             "properties": {"title": "Expiry / cancellation events", "region": "${AWS::Region}",
+               "query": "SOURCE '${ExpiryLogGroup}' | SOURCE '${CancellationLogGroup}' | SOURCE '${StreamProcessorLogGroup}' | fields @timestamp, message, taskId, reason | sort @timestamp desc | limit 50"}}
+          ]
+        }
+
+  # ------------------------------------------------------------------ Frontend (Amplify Hosting)
+  FrontendApp:
+    Type: AWS::Amplify::App
+    Condition: CreateFrontend
+    Properties:
+      Name: !Sub "${AWS::StackName}-frontend"
+      Repository: !Ref FrontendRepositoryUrl
+      AccessToken: !Sub "{{resolve:secretsmanager:${GitHubTokenSecretName}}}"
+      Platform: WEB
+      BuildSpec: |
+        version: 1
+        applications:
+          - appRoot: frontend
+            frontend:
+              phases:
+                preBuild:
+                  commands:
+                    - npm ci
+                build:
+                  commands:
+                    - npm run build
+              artifacts:
+                baseDirectory: dist
+                files:
+                  - '**/*'
+              cache:
+                paths:
+                  - node_modules/**/*
+      EnvironmentVariables:
+        - Name: AMPLIFY_MONOREPO_APP_ROOT
+          Value: frontend
+        - Name: VITE_AWS_REGION
+          Value: !Ref AWS::Region
+        - Name: VITE_API_URL
+          Value: !Sub "https://${TodoApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+        - Name: VITE_USER_POOL_ID
+          Value: !Ref UserPool
+        - Name: VITE_USER_POOL_CLIENT_ID
+          Value: !Ref UserPoolClient
+      Tags:
+        - Key: Project
+          Value: serverless-todo
+
+  FrontendBranchResource:
+    Type: AWS::Amplify::Branch
+    Condition: CreateFrontend
+    Properties:
+      AppId: !GetAtt FrontendApp.AppId
+      BranchName: !Ref FrontendBranch
+      EnableAutoBuild: true
+      Stage: PRODUCTION
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the REST API
+    Value: !Sub "https://${TodoApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  TasksTableName:
+    Value: !Ref TasksTable
+  NotificationsTopicArn:
+    Value: !Ref TaskNotificationsTopic
+  ExpiryQueueUrl:
+    Value: !Ref ExpiryQueue
+  CancellationQueueUrl:
+    Value: !Ref CancellationQueue
+  ScheduleGroupName:
+    Value: !Ref ExpiryScheduleGroup
+  DashboardUrl:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}-operations"
+  AmplifyAppId:
+    Condition: CreateFrontend
+    Value: !GetAtt FrontendApp.AppId
+  FrontendUrl:
+    Condition: CreateFrontend
+    Value: !Sub "https://${FrontendBranch}.${FrontendApp.DefaultDomain}"

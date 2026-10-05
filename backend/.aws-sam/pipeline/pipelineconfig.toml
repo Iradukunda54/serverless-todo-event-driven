@@ -1,0 +1,17 @@
+version = 0.1
+
+[default.pipeline_bootstrap.parameters]
+oidc_provider_url = "https://token.actions.githubusercontent.com"
+oidc_client_id = "sts.amazonaws.com"
+github_org = "Iradukunda54@267279209"
+github_repo = "serverless-todo-event-driven@1405567111"
+deployment_branch = "main"
+oidc_provider = "github-actions"
+permissions_provider = "OpenID Connect (OIDC)"
+
+[todo-dev.pipeline_bootstrap.parameters]
+pipeline_execution_role = "arn:aws:iam::447558491229:role/aws-sam-cli-managed-todo-dev--PipelineExecutionRole-ia3fGXu5yq4c"
+cloudformation_execution_role = "arn:aws:iam::447558491229:role/aws-sam-cli-managed-todo--CloudFormationExecutionRo-kuO75skYXLiA"
+artifacts_bucket = "aws-sam-cli-managed-todo-dev-pipel-artifactsbucket-qzftvv5ywmcr"
+image_repository = ""
+region = "eu-west-1"
