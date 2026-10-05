@@ -163,15 +163,6 @@ def list_handler(event, _context):
     return response(200, {"tasks": items})
 
 
-def get_handler(event, _context):
-    user_id = user_id_from(event)
-    task_id = event["pathParameters"]["taskId"]
-    item = table().get_item(Key={"UserId": user_id, "TaskId": task_id}).get("Item")
-    if not item:
-        return error(404, "Task not found")
-    return response(200, item)
-
-
 def update_handler(event, _context):
     """Edit Description/Date; the only allowed status change is Pending -> Completed.
 

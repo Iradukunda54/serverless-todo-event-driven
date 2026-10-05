@@ -86,8 +86,6 @@ Resources:
             ProjectionType: ALL
       StreamSpecification:
         StreamViewType: NEW_AND_OLD_IMAGES
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
       SSESpecification:
         SSEEnabled: true
       Tags:
@@ -289,26 +287,6 @@ Resources:
           Properties:
             RestApiId: !Ref TodoApi
             Path: /tasks
-            Method: GET
-
-  GetTaskFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      Description: GET /tasks/{taskId}
-      Handler: tasks_api.get_handler
-      LoggingConfig:
-        LogGroup: !Ref GetTaskLogGroup
-      Policies:
-        - Statement:
-            - Effect: Allow
-              Action: dynamodb:GetItem
-              Resource: !GetAtt TasksTable.Arn
-      Events:
-        Api:
-          Type: Api
-          Properties:
-            RestApiId: !Ref TodoApi
-            Path: /tasks/{taskId}
             Method: GET
 
   UpdateTaskFunction:
@@ -555,11 +533,6 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-list-tasks"
-      RetentionInDays: !Ref LogRetentionDays
-  GetTaskLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-get-task"
       RetentionInDays: !Ref LogRetentionDays
   UpdateTaskLogGroup:
     Type: AWS::Logs::LogGroup

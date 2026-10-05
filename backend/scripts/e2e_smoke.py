@@ -123,6 +123,10 @@ def main():
     status, headers, _ = http("GET", f"{api}/tasks")
     check(status == 401 and headers.get("Access-Control-Allow-Origin") == "*", "unauthenticated -> 401 with CORS")
 
+    def find(task_id):
+        _, _, body = http("GET", f"{api}/tasks", token)
+        return next((t for t in body["tasks"] if t["TaskId"] == task_id), None)
+
     # ------------------------------------------------------------ CRUD
     status, _, expiring = http("POST", f"{api}/tasks", token, {"Description": "e2e: should expire", "ExpiresInMinutes": 1})
     check(status == 201 and expiring["Status"] == "Pending", f"create task expiring in 1 minute -> {status} {expiring if status != 201 else ''}")
@@ -138,8 +142,7 @@ def main():
 
     status, _, listed = http("GET", f"{api}/tasks", token)
     check(status == 200 and len(listed["tasks"]) == 4, "list returns 4 tasks")
-    status, _, got = http("GET", f"{api}/tasks/{default['TaskId']}", token)
-    check(status == 200 and got["TaskId"] == default["TaskId"], "get task")
+    check(default["TaskId"] in {t["TaskId"] for t in listed["tasks"]}, "listed tasks include the new task")
     status, _, edited = http("PUT", f"{api}/tasks/{default['TaskId']}", token, {"Description": "e2e: edited", "Date": "2026-12-31"})
     check(status == 200 and edited["Description"] == "e2e: edited", "update description/date")
 
@@ -157,12 +160,12 @@ def main():
     print(f"...waiting for the 1-minute task to expire (deadline {soon})")
 
     def expired():
-        _, _, t = http("GET", f"{api}/tasks/{expiring['TaskId']}", token)
+        t = find(expiring["TaskId"])
         return t if t and t["Status"] == "Expired" and t.get("NotifiedAt") else None
 
     task = wait_for(expired, 180, 10)
     check(task is not None, "task expired at deadline and SNS notification published (NotifiedAt set)")
-    status, _, done = http("GET", f"{api}/tasks/{to_complete['TaskId']}", token)
+    done = find(to_complete["TaskId"])
     check(done["Status"] == "Completed", "completed task was not expired")
     status, _, pending = http("GET", f"{api}/tasks?status=Expired", token)
     check([t["TaskId"] for t in pending["tasks"]] == [expiring["TaskId"]], "status filter (GSI) returns the expired task")

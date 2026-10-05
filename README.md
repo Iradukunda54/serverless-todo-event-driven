@@ -13,7 +13,7 @@ backend/                         SAM application
   template.yaml                  all AWS resources (incl. AWS::Amplify::App / Branch)
   samconfig.toml                 deploy settings (stack serverless-todo-dev)
   src/                           Lambda code (Python 3.14)
-    tasks_api.py                   CRUD handlers (API Gateway)
+    tasks_api.py                   CRUD handlers (API Gateway): create, list, update, delete
     auth_triggers.py               Cognito PreSignUp + PostAuthentication
     expiry.py                      expiry handler (SQS FIFO consumer)
     stream_processor.py            DynamoDB Stream -> cancellation FIFO queue
@@ -48,7 +48,7 @@ flowchart LR
 
   subgraph Api[Task API]
     API[API Gateway REST<br/>Cognito authorizer]
-    CRUD[λ create · list · get<br/>update · delete]
+    CRUD[λ create · list<br/>update · delete]
   end
 
   DDB[(DynamoDB tasks<br/>PK UserId · SK TaskId<br/>GSI UserStatusIndex)]
@@ -91,7 +91,7 @@ flowchart LR
 |---|---|
 | **Amazon Cognito User Pool** | Email/password sign-up and sign-in. The **PreSignUp** trigger auto-confirms users. The **PostAuthentication** trigger subscribes the user's email to SNS. |
 | **Amazon API Gateway (REST)** | `/tasks` CRUD endpoints, protected by a Cognito User Pool authorizer |
-| **AWS Lambda** | 5 CRUD handlers, 2 Cognito triggers, expiry handler, stream processor, cancellation handler |
+| **AWS Lambda** | 4 CRUD handlers, 2 Cognito triggers, expiry handler, stream processor, cancellation handler |
 | **Amazon DynamoDB** | One On-Demand table; Streams turned on for the cancellation workflow |
 | **Amazon EventBridge (Scheduler)** | One one-time `at(...)` schedule per task, fired at its deadline |
 | **Amazon SQS FIFO** | `task-expiry.fifo` (expiry events) and `task-cancellation.fifo` (cancellation events), each with a FIFO dead-letter queue |
@@ -121,7 +121,6 @@ The GSI `UserStatusIndex` (`UserId` + `Status`) serves `GET /tasks?status=Pendin
 |---|---|
 | `POST /tasks` | Body `{"Description", "Date"?, "Deadline"? \| "ExpiresInMinutes"?}`. Creates a `Pending` task and its expiry schedule. → `201`. `ExpiresInMinutes` is resolved with the server clock, so client clock skew doesn't matter; the UI uses it. With neither field, the deadline is creation + 5 min. |
 | `GET /tasks[?status=]` | Lists the caller's tasks, newest first |
-| `GET /tasks/{taskId}` | Gets one task (`404` if it isn't the caller's) |
 | `PUT /tasks/{taskId}` | Body `{"Description"?, "Date"?, "Status"?: "Completed"}`. The only allowed status change is `Pending → Completed`, otherwise `409`. |
 | `DELETE /tasks/{taskId}` | Deletes the task. → `204` |
 

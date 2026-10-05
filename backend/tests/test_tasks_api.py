@@ -72,12 +72,9 @@ def test_list_get_and_isolation(aws):
     assert len(pending) == 2
     assert tasks_api.list_handler(api_event(query={"status": "Bogus"}), None)["statusCode"] == 400
 
-    got = tasks_api.get_handler(api_event(path={"taskId": first["TaskId"]}), None)
-    assert json.loads(got["body"])["Description"] == "first"
-
-    # Another user cannot read this task.
-    other = tasks_api.get_handler(api_event(path={"taskId": first["TaskId"]}, user_id=OTHER_USER_ID), None)
-    assert other["statusCode"] == 404
+    # Another user cannot see these tasks.
+    other = json.loads(tasks_api.list_handler(api_event(user_id=OTHER_USER_ID), None)["body"])["tasks"]
+    assert [t["Description"] for t in other] == ["other user"]
 
 
 def test_update_description_and_complete(aws):
