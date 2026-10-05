@@ -275,7 +275,7 @@ curl -s "$API_URL/tasks" -H "Authorization: $TOKEN"
 
 ## Test evidence
 
-Screenshot of the deployed Amplify frontend (https://main.d3uyo6q8czq0ls.amplifyapp.com), signed in through Cognito. A task completed before its deadline is under **Completed**. A task left Pending until its 5-minute deadline was moved to **Expired** automatically by the EventBridge Scheduler → SQS FIFO → Lambda workflow.
+Screenshot of the deployed Amplify frontend (https://main.d3uyo6q8czq0ls.amplifyapp.com), signed in through Cognito as `iradukundakevine54@gmail.com`. Tasks completed before their deadline are under **Completed**. The task *test 1 minute* was left Pending, so at its deadline the EventBridge Scheduler → SQS FIFO → Lambda workflow moved it to **Expired** automatically.
 
 ![Deployed frontend showing Completed and Expired tasks](docs/screenshots/frontend-tasks.png)
 
