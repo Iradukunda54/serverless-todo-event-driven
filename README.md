@@ -279,6 +279,20 @@ Screenshot of the deployed Amplify frontend (https://main.d3uyo6q8czq0ls.amplify
 
 ![Deployed frontend showing Completed and Expired tasks](docs/screenshots/frontend-tasks.png)
 
+**Email notification workflow:**
+
+1. After the first sign-in, the **PostAuthentication** Lambda subscribed the user's email to the SNS topic. SNS sent the confirmation request:
+
+   ![SNS subscription confirmation email](docs/screenshots/sns-subscription-email.png)
+
+2. The user confirmed the subscription. It now has the filter policy `{"userId": ["<Cognito sub>"]}`, so only this user's task notifications are delivered to this address:
+
+   ![SNS subscription confirmed](docs/screenshots/sns-subscription-confirmed.png)
+
+3. A task created with *Expires in: 1 minute* was not completed. At its deadline the Expiry Lambda marked it `Expired` and published to SNS, and the owner received this email:
+
+   ![Task expired email notification](docs/screenshots/task-expired-email.png)
+
 Automated checks:
 - **Unit tests:** `backend/tests`, run in the backend pipeline on every push.
 - **Pipeline runs:** in the repository's **Actions** tab.
