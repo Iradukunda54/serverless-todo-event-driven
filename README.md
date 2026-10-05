@@ -24,7 +24,7 @@ frontend/                        Vite + aws-amplify (Auth) single-page app, host
 docs/architecture.drawio         network/architecture diagram (open with draw.io / diagrams.net)
 .github/workflows/
   backend-pipeline.yml           test -> build -> deploy (SAM pipeline, GitHub OIDC)
-  frontend-ci.yml                frontend build check (Amplify does the hosting builds)
+  frontend-deploy.yml            build frontend/ with the Amplify app's env vars -> deploy to Amplify Hosting
 ```
 
 ## Architecture
@@ -97,7 +97,7 @@ flowchart LR
 | **Amazon SQS FIFO** | `task-expiry.fifo` (expiry events) and `task-cancellation.fifo` (cancellation events), each with a FIFO dead-letter queue |
 | **Amazon SNS** | Email notifications. Each subscription has a `userId` filter policy, so users only get emails about their own tasks. |
 | **Amazon CloudWatch** | JSON-structured Lambda logs with retention, API metrics, alarms and an operations dashboard |
-| **AWS Amplify Hosting** | Hosts the `frontend/` app. Defined in the SAM template, which also sets its environment variables. |
+| **AWS Amplify Hosting** | Hosts the `frontend/` app. The app, branch and environment variables are defined in the SAM template; GitHub Actions deploys each build to it. |
 
 ## How it works
 
@@ -216,20 +216,7 @@ Then add these **repository variables** (Settings → Secrets and variables → 
 | `CLOUDFORMATION_EXECUTION_ROLE` | `CloudFormationExecutionRole` output |
 | `ARTIFACTS_BUCKET` | `ArtifactsBucket` output (bucket **name**) |
 
-### 2. One-time: GitHub token for Amplify
-
-Amplify needs access to this repo to build `frontend/`:
-1. Install the **AWS Amplify GitHub App** on the repository: https://github.com/apps/aws-amplify-eu-west-1/installations/new
-2. Create a GitHub personal access token (classic, scope `admin:repo_hook`) and store it as a plain-text secret:
-
-```bash
-aws secretsmanager create-secret --region eu-west-1 \
-  --name serverless-todo/github-token --secret-string '<token>'
-```
-
-[backend/samconfig.toml](backend/samconfig.toml) passes `GitHubTokenSecretName=serverless-todo/github-token`. If you set that parameter to an empty string, the stack deploys without the Amplify app.
-
-### 3. Deploy
+### 2. Deploy the backend (and create the Amplify app)
 
 Push to `main`. [backend-pipeline.yml](.github/workflows/backend-pipeline.yml) runs:
 1. unit tests
@@ -238,15 +225,31 @@ Push to `main`. [backend-pipeline.yml](.github/workflows/backend-pipeline.yml) r
 4. assume the pipeline role through OIDC
 5. `sam deploy --config-env dev`
 
-Creating the Amplify branch through CloudFormation doesn't start a build, so start the first frontend build once:
+The stack also creates:
+- the Amplify Hosting app and its `main` branch, with environment variables `VITE_API_URL`, `VITE_USER_POOL_ID`, `VITE_USER_POOL_CLIENT_ID` and `VITE_AWS_REGION` taken from the stack's own API and Cognito resources;
+- `FrontendDeployRole`, an IAM role that only this repo's `main` branch can assume through the account's existing GitHub OIDC provider. It may only deploy to this Amplify app.
+
+### 3. Deploy the frontend to Amplify Hosting
+
+The Amplify app uses **manual deployments**, so Amplify needs no GitHub connection, GitHub App or personal access token. [frontend-deploy.yml](.github/workflows/frontend-deploy.yml) does the following:
+1. assumes `FrontendDeployRole`;
+2. reads the `VITE_*` environment variables from the Amplify app;
+3. builds `frontend/` with Node 22;
+4. uploads the build with `amplify create-deployment` / `start-deployment`;
+5. waits for the deployment job to report `SUCCEED`.
+
+One-time setup: add two more repository variables from the stack outputs, then run the workflow (or push a change under `frontend/`):
+
+| Variable | Value |
+|---|---|
+| `FRONTEND_DEPLOY_ROLE` | `FrontendDeployRoleArn` output |
+| `AMPLIFY_APP_ID` | `AmplifyAppId` output |
 
 ```bash
-APP_ID=$(aws cloudformation describe-stacks --stack-name serverless-todo-dev \
-  --query "Stacks[0].Outputs[?OutputKey=='AmplifyAppId'].OutputValue" --output text)
-aws amplify start-job --app-id $APP_ID --branch-name main --job-type RELEASE
+gh workflow run frontend-deploy.yml --ref main
 ```
 
-After that, every push to `main` rebuilds the frontend automatically. The `FrontendUrl` stack output is the app URL.
+After that, every push to `main` that changes `frontend/` redeploys it. The `FrontendUrl` stack output is the app URL.
 
 ## Verify / demo
 
@@ -282,5 +285,4 @@ curl -s "$API_URL/tasks" -H "Authorization: $TOKEN"
 
 ```bash
 sam delete --stack-name serverless-todo-dev --region eu-west-1
-aws secretsmanager delete-secret --secret-id serverless-todo/github-token --force-delete-without-recovery
 ```

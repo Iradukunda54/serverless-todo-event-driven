@@ -1,0 +1,106 @@
+name: Frontend - Amplify deploy
+
+# Builds frontend/ with the environment variables defined on the Amplify app
+# (set by the SAM template from the backend resources) and deploys the build
+# to Amplify Hosting. Pull requests only run the build.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-deploy.yml"
+  pull_request:
+    paths:
+      - "frontend/**"
+  workflow_dispatch:
+
+permissions:
+  id-token: write # GitHub OIDC -> AWS
+  contents: read
+
+concurrency:
+  group: frontend-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
+  STACK_NAME: serverless-todo-dev
+  BRANCH: main
+
+defaults:
+  run:
+    working-directory: frontend
+
+jobs:
+  build-check:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+        env:
+          VITE_AWS_REGION: eu-west-1
+          VITE_API_URL: https://example.execute-api.eu-west-1.amazonaws.com/dev
+          VITE_USER_POOL_ID: eu-west-1_example
+          VITE_USER_POOL_CLIENT_ID: example
+
+  deploy:
+    # Skipped until the FRONTEND_DEPLOY_ROLE variable (stack output FrontendDeployRoleArn) is set.
+    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.FRONTEND_DEPLOY_ROLE != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Assume frontend deploy role (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ vars.FRONTEND_DEPLOY_ROLE }}
+          role-session-name: frontend-deployment
+
+      - name: Load configuration from the Amplify app's environment variables
+        run: |
+          APP_ID="${{ vars.AMPLIFY_APP_ID }}"
+          echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
+          aws amplify get-app --app-id "$APP_ID" \
+            --query "app.environmentVariables" --output json \
+            | jq -r 'to_entries[] | select(.key | startswith("VITE_")) | "\(.key)=\(.value)"' >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          for v in VITE_AWS_REGION VITE_API_URL VITE_USER_POOL_ID VITE_USER_POOL_CLIENT_ID; do
+            [ -n "${!v}" ] || { echo "::error::$v is missing on the Amplify app"; exit 1; }
+          done
+          npm ci
+          npm run build
+
+      - name: Upload and deploy to Amplify Hosting
+        run: |
+          (cd dist && zip -qr ../build.zip .)
+          read -r JOB_ID UPLOAD_URL < <(aws amplify create-deployment --app-id "$APP_ID" --branch-name "$BRANCH" \
+            --query "[jobId, zipUploadUrl]" --output text)
+          curl --fail --silent --show-error -X PUT -H "Content-Type: application/zip" -T build.zip "$UPLOAD_URL"
+          aws amplify start-deployment --app-id "$APP_ID" --branch-name "$BRANCH" --job-id "$JOB_ID" > /dev/null
+          for i in $(seq 1 60); do
+            STATUS=$(aws amplify get-job --app-id "$APP_ID" --branch-name "$BRANCH" --job-id "$JOB_ID" \
+              --query "job.summary.status" --output text)
+            echo "Deployment job $JOB_ID: $STATUS"
+            case "$STATUS" in
+              SUCCEED) break ;;
+              FAILED|CANCELLED) exit 1 ;;
+            esac
+            sleep 5
+          done
+          [ "$STATUS" = "SUCCEED" ]
+          echo "Deployed: https://$BRANCH.$(aws amplify get-app --app-id "$APP_ID" --query app.defaultDomain --output text)"

@@ -16,5 +16,5 @@ region = "eu-west-1"
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = false
 fail_on_empty_changeset = false
-parameter_overrides = "Stage=dev GitHubTokenSecretName=\"\""
+parameter_overrides = "Stage=dev"
 tags = "Project=serverless-todo Stage=dev"
