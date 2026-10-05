@@ -41,6 +41,16 @@ def test_create_with_custom_deadline(aws):
     assert task["Date"] == "2026-12-01"
 
 
+def test_create_with_relative_deadline(aws):
+    before = common.now_utc()
+    resp, task = _create(ExpiresInMinutes=2)
+    assert resp["statusCode"] == 201
+    delta = common.parse_iso(task["Deadline"]) - before
+    assert timedelta(minutes=1, seconds=55) <= delta <= timedelta(minutes=2, seconds=5)
+    for bad in (0, -1, "5", 1.5, True, 10**7):
+        assert _create(ExpiresInMinutes=bad)[0]["statusCode"] == 400
+
+
 def test_create_validation(aws):
     assert _create(description="  ")[0]["statusCode"] == 400
     assert _create(Date="12/01/2026")[0]["statusCode"] == 400

@@ -148,7 +148,8 @@ async function handleCreate(event) {
   event.preventDefault();
   const minutes = $("new-deadline").value;
   const task = { Description: $("new-description").value, Date: $("new-date").value };
-  if (minutes) task.Deadline = new Date(Date.now() + Number(minutes) * 60000).toISOString();
+  // Relative value: the server computes the deadline with its own clock.
+  if (minutes) task.ExpiresInMinutes = Number(minutes);
   await run(async () => {
     await createTask(task);
     $("new-description").value = "";

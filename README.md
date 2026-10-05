@@ -119,7 +119,7 @@ The GSI `UserStatusIndex` (`UserId` + `Status`) serves `GET /tasks?status=Pendin
 
 | Method & path | Behaviour |
 |---|---|
-| `POST /tasks` | Body `{"Description", "Date"?, "Deadline"?}`. Creates a `Pending` task and its expiry schedule. → `201` |
+| `POST /tasks` | Body `{"Description", "Date"?, "Deadline"? \| "ExpiresInMinutes"?}`. Creates a `Pending` task and its expiry schedule. → `201`. `ExpiresInMinutes` is resolved with the server clock, so client clock skew doesn't matter; the UI uses it. With neither field, the deadline is creation + 5 min. |
 | `GET /tasks[?status=]` | Lists the caller's tasks, newest first |
 | `GET /tasks/{taskId}` | Gets one task (`404` if it isn't the caller's) |
 | `PUT /tasks/{taskId}` | Body `{"Description"?, "Date"?, "Status"?: "Completed"}`. The only allowed status change is `Pending → Completed`, otherwise `409`. |

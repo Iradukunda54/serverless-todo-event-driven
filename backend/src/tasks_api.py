@@ -32,6 +32,7 @@ from common import (
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MAX_DESCRIPTION = 500
 MIN_DEADLINE_SECONDS = 30
+MAX_MINUTES = 365 * 24 * 60
 
 
 def _body(event):
@@ -93,7 +94,13 @@ def create_handler(event, _context):
         return error(400, problem)
 
     default_minutes = int(os.environ.get("DEFAULT_DEADLINE_MINUTES", "5"))
-    if data.get("Deadline"):
+    if data.get("ExpiresInMinutes") is not None:
+        # Relative deadline, resolved with the server clock (immune to client clock skew).
+        minutes = data["ExpiresInMinutes"]
+        if isinstance(minutes, bool) or not isinstance(minutes, int) or not 1 <= minutes <= MAX_MINUTES:
+            return error(400, f"ExpiresInMinutes must be an integer between 1 and {MAX_MINUTES}")
+        deadline = now + timedelta(minutes=minutes)
+    elif data.get("Deadline"):
         try:
             deadline = parse_iso(str(data["Deadline"]))
         except ValueError:
