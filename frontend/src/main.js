@@ -9,6 +9,10 @@ const $ = (id) => document.getElementById(id);
 
 let authMode = "signin";
 let refreshTimer = null;
+// Server clock minus browser clock, learned from a created task's CreatedAt, so the
+// countdown stays correct even when the device clock is off (deadlines are server-side).
+let clockOffsetMs = 0;
+const serverNow = () => Date.now() + clockOffsetMs;
 
 Amplify.configure({
   Auth: {
@@ -28,13 +32,13 @@ function showBanner(message, kind = "error") {
   banner.hidden = !message;
 }
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => new Date(serverNow()).toISOString().slice(0, 10);
 
 function formatDeadline(task) {
   const deadline = new Date(task.Deadline);
   const local = deadline.toLocaleString();
   if (task.Status !== "Pending") return `Deadline ${local}`;
-  const seconds = Math.round((deadline - Date.now()) / 1000);
+  const seconds = Math.round((deadline - serverNow()) / 1000);
   if (seconds <= 0) return `Deadline ${local} (expiring…)`;
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
@@ -151,7 +155,9 @@ async function handleCreate(event) {
   // Relative value: the server computes the deadline with its own clock.
   if (minutes) task.ExpiresInMinutes = Number(minutes);
   await run(async () => {
-    await createTask(task);
+    const sentAt = Date.now();
+    const created = await createTask(task);
+    clockOffsetMs = Date.parse(created.CreatedAt) - (sentAt + Date.now()) / 2;
     $("new-description").value = "";
   });
 }
