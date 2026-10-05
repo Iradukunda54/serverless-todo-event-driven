@@ -273,6 +273,21 @@ curl -s -X POST "$API_URL/tasks" -H "Authorization: $TOKEN" -H "Content-Type: ap
 curl -s "$API_URL/tasks" -H "Authorization: $TOKEN"
 ```
 
+## Test evidence
+
+Screenshot of the deployed Amplify frontend (https://main.d3uyo6q8czq0ls.amplifyapp.com), signed in through Cognito. A task completed before its deadline is under **Completed**. A task left Pending until its 5-minute deadline was moved to **Expired** automatically by the EventBridge Scheduler → SQS FIFO → Lambda workflow.
+
+![Deployed frontend showing Completed and Expired tasks](docs/screenshots/frontend-tasks.png)
+
+Automated checks:
+- **Unit tests:** `backend/tests`, run in the backend pipeline on every push.
+- **Pipeline runs:** in the repository's **Actions** tab.
+- **End-to-end test:** [backend/scripts/e2e_smoke.py](backend/scripts/e2e_smoke.py) runs against the deployed stack. It checks:
+  - sign-up is auto-confirmed and sign-in subscribes the email to SNS
+  - CRUD through API Gateway
+  - expiry at the deadline, with the SNS publish
+  - cancellation after complete and after delete
+
 ## Expected result
 
 - Users sign up and sign in with email and password, with no verification code. Their email is subscribed to SNS after their first sign-in.

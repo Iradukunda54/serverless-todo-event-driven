@@ -24,7 +24,8 @@
           <button class="tab" data-mode="signup">Sign up</button>
         </div>
         <form id="auth-form">
-          <label>Email <input id="auth-email" type="email" autocomplete="email" required /></label>
+          <label>Email <input id="auth-email" type="email" autocomplete="email" required
+            pattern="[^@\s]+@[^@\s]+\.[A-Za-z]{2,}" title="A complete email address, e.g. name@gmail.com" /></label>
           <label>Password
             <input id="auth-password" type="password" autocomplete="current-password" minlength="8" required />
           </label>

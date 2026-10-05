@@ -2,12 +2,23 @@
 
 import json
 import os
+import re
 
 from common import logger, sns
 
 
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
+
+
 def pre_signup_handler(event, _context):
-    """Auto-confirm every sign-up and mark the email as verified (no verification code)."""
+    """Auto-confirm every sign-up and mark the email as verified (no verification code).
+
+    Because nothing verifies the address, reject obviously undeliverable ones
+    (e.g. "name@gmail" without a domain suffix) so notifications can reach the user.
+    """
+    email = event["request"].get("userAttributes", {}).get("email", "")
+    if not EMAIL_RE.match(email):
+        raise ValueError("Please enter a complete email address, e.g. name@gmail.com")
     event["response"]["autoConfirmUser"] = True
     if "email" in event["request"].get("userAttributes", {}):
         event["response"]["autoVerifyEmail"] = True

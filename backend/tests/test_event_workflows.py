@@ -200,6 +200,13 @@ def test_pre_signup_auto_confirms():
     assert out["response"] == {"autoConfirmUser": True, "autoVerifyEmail": True}
 
 
+@pytest.mark.parametrize("email", ["name@gmail", "no-at-sign.com", "a b@gmail.com", ""])
+def test_pre_signup_rejects_undeliverable_email(email):
+    event = {"request": {"userAttributes": {"email": email}}, "response": {}}
+    with pytest.raises(ValueError):
+        auth_triggers.pre_signup_handler(event, None)
+
+
 def _post_auth_event(email="a@example.com", sub=USER_ID):
     return {"request": {"userAttributes": {"email": email, "sub": sub}}, "response": {}}
 
