@@ -799,6 +799,7 @@ Resources:
                 Resource:
                   - !Sub "arn:${AWS::Partition}:amplify:${AWS::Region}:${AWS::AccountId}:apps/${FrontendApp.AppId}/branches/${FrontendBranch}"
                   - !Sub "arn:${AWS::Partition}:amplify:${AWS::Region}:${AWS::AccountId}:apps/${FrontendApp.AppId}/branches/${FrontendBranch}/jobs/*"
+                  - !Sub "arn:${AWS::Partition}:amplify:${AWS::Region}:${AWS::AccountId}:apps/${FrontendApp.AppId}/branches/${FrontendBranch}/deployments/*"
 
 Outputs:
   ApiUrl:
